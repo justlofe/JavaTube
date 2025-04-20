@@ -14,6 +14,8 @@ import static java.lang.Math.min;
 
 public class Stream{
 
+    private final static Consumer<Long> EMPTY_PROGRESS = (ignored) -> {};
+
     private final String title;
     private final String url;
     private final Integer itag;
@@ -158,75 +160,62 @@ public class Stream{
         }
     }
 
-    private String safeFileName(String s){
-        return s.replaceAll("[\"'#$%*,.:;<>?\\\\^|~/]", " ");
+    public void download(File file) throws Exception {
+        download(file, EMPTY_PROGRESS);
     }
 
-    private void checkFile(String filePath) throws IOException {
-        File file = new File(filePath);
-        if(file.exists()){
-            if(!file.delete()){
-                throw new IOException("Failed to delete existing output file: " + file.getName());
+    public void download(File file, Consumer<Long> progress) throws Exception{
+        try (FileOutputStream fos = new FileOutputStream(file, true)) {
+            download(fos, progress);
+        }
+    }
+
+    public void download(OutputStream stream) throws Exception {
+        startDownload(stream, EMPTY_PROGRESS);
+    }
+
+    public void download(OutputStream stream, Consumer<Long> progress) throws Exception {
+        startDownload(stream, progress);
+    }
+
+    private void startDownload(OutputStream stream, Consumer<Long> progress) throws Exception {
+        if(isOtf) {
+            downloadOtf(stream, progress);
+            return;
+        }
+
+        long startSize = 0;
+        long stopPos;
+        int defaultRange = 1048576;
+        long progressPercentage;
+        long lastPrintedProgress = 0;
+        byte[] chunkReceived;
+
+        do {
+            stopPos = min(startSize + defaultRange, fileSize);
+            if (stopPos >= fileSize) {
+                stopPos = fileSize;
             }
-        }
+            String chunk = url + "&range=" + startSize + "-" + stopPos;
+            chunkReceived = Request.get(chunk).toByteArray();
+
+            progressPercentage = (stopPos * 100L) / (fileSize);
+
+            if (progressPercentage != lastPrintedProgress) {
+                lastPrintedProgress = progressPercentage;
+                progress.accept(progressPercentage);
+            }
+
+            startSize += chunkReceived.length;
+            stream.write(chunkReceived);
+        } while (stopPos != fileSize);
     }
 
-    public static void onProgress(long value){
-        System.out.println(value + "%");
-    }
-    public void download(String path) throws Exception {
-        startDownload(path, title, Stream::onProgress);
-    }
-    public void download(String path, Consumer<Long> progress) throws Exception {
-        startDownload(path, title, progress);
-    }
-    public void download(String path, String fileName) throws Exception {
-        startDownload(path, fileName, Stream::onProgress);
-    }
-    public void download(String path, String fileName, Consumer<Long> progress) throws Exception {
-        startDownload(path, fileName, progress);
-    }
-    private void startDownload(String path, String fileName, Consumer<Long> progress) throws Exception {
-        String savePath = path + safeFileName(fileName) + "." + subType;
-        if(!isOtf){
-            long startSize = 0;
-            long stopPos;
-            int defaultRange = 1048576;
-            long progressPercentage;
-            long lastPrintedProgress = 0;
-            byte[] chunkReceived;
-
-            checkFile(savePath);
-            do {
-                stopPos = min(startSize + defaultRange, fileSize);
-                if (stopPos >= fileSize) {
-                    stopPos = fileSize;
-                }
-                String chunk = url + "&range=" + startSize + "-" + stopPos;
-                chunkReceived = Request.get(chunk).toByteArray();
-
-                progressPercentage = (stopPos * 100L) / (fileSize);
-
-                if (progressPercentage != lastPrintedProgress) {
-                    lastPrintedProgress = progressPercentage;
-                    progress.accept(progressPercentage);
-                }
-                startSize = startSize + chunkReceived.length;
-                try (FileOutputStream fos = new FileOutputStream(savePath, true)) {
-                    fos.write(chunkReceived);
-                }
-            } while (stopPos != fileSize);
-        }else {
-            downloadOtf(savePath, progress);
-        }
-    }
-
-    private void downloadOtf(String savePath, Consumer<Long> progress) throws Exception {
+    private void downloadOtf(OutputStream stream, Consumer<Long> progress) throws Exception {
         int countChunk = 0;
         byte[] chunkReceived;
         int lastChunk = 0;
 
-        checkFile(savePath);
         do {
             String chunk = url + "&sq=" + countChunk;
 
@@ -235,21 +224,17 @@ public class Stream{
             if(countChunk == 0){
                 Pattern pattern = Pattern.compile("Segment-Count: (\\d*)");
                 Matcher matcher = pattern.matcher(new String(chunkReceived));
-                if (matcher.find()){
-                    lastChunk = Integer.parseInt(matcher.group(1));
-                }else{
-                    throw new RegexMatchError("downloadOtf: " + pattern);
-                }
+                if (matcher.find()) lastChunk = Integer.parseInt(matcher.group(1));
+                else throw new RegexMatchError("downloadOtf: " + pattern);
             }
+
             progress.accept((countChunk * 100L) / (lastChunk));
             countChunk = countChunk + 1;
-            try (FileOutputStream fos = new FileOutputStream(savePath, true)) {
-                fos.write(chunkReceived);
-            }
-        }while (countChunk <= lastChunk);
+            stream.write(chunkReceived);
+        } while (countChunk <= lastChunk);
     }
 
-    private Map<String, String> getFormatProfile(){
+    private Map<String, String> getFormatProfile() {
         Map<Integer, ArrayList<String>> itags = new HashMap<>();
 
         // progressive video
@@ -369,20 +354,16 @@ public class Stream{
         itags.put(600, new ArrayList<>(Arrays.asList(null, null))); // webm
 
 
-        String res, bitrate;
-        if(itags.containsKey(itag)){
-            res = itags.get(itag).get(0);
-            bitrate = itags.get(itag).get(1);
-        }else{
-            res = null;
-            bitrate = null;
+        String res = null, bitrate = null;
+        if(itags.containsKey(itag)) {
+            var tags = itags.get(itag);
+            res = tags.get(0);
+            bitrate = tags.get(1);
         }
 
         Map<String, String> returnItags = new HashMap<>();
-
         returnItags.put("resolution", res);
         returnItags.put("abr", bitrate);
-
         return returnItags;
     }
     public String getTitle(){
